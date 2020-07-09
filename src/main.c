@@ -1,3 +1,8 @@
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdlib.h>
+
 #include "predef.h"
 
 #ifdef WZ_MSVC
@@ -24,6 +29,7 @@
 static int cmd_version(int argc, char ** argv);
 static int cmd_help(int argc, char ** argv);
 static int cmd_ls(int argc, char ** argv);
+static int cmd_dump(int argc, char ** argv);
 static int cmd_time(int argc, char ** argv);
 
 typedef struct {
@@ -38,6 +44,7 @@ static const wzcmd wz_cmds[] = {
   {"--help",    cmd_help},
   {"help",      cmd_help},
   {"ls",        cmd_ls},
+  {"dump",      cmd_dump},
   {"time",      cmd_time}
 };
 
@@ -380,6 +387,199 @@ close_file:
 free_ctx:
   wz_free_ctx(ctx);
   return ret;
+}
+
+static void wz_mkdir(char * path) {
+   struct stat st = {0};
+   if (stat(path, &st) == -1) {
+      mkdir(path, 0700);
+   }
+}
+static void saveFile(wz_uint8_t * data, unsigned long size, char * path) {
+   FILE * savefile;
+   if ((savefile = fopen(path, "w+")) == NULL) {
+      perror(path);
+      return;
+   }
+   if (fwrite(data, size, 1, savefile) != 1) {
+      perror(path);
+   }
+   fclose(savefile);
+}
+static void saveIntArrayFile(wz_int32_t * data, unsigned int len, char * path) {
+   FILE * savefile;
+   char buf[4096];
+   unsigned int i;
+   if ((savefile = fopen(path, "w+")) == NULL) {
+      perror(path);
+      return;
+   }
+   for (i = 0; i < len; i ++) {
+      unsigned int base = 2 * i;
+      unsigned long slen = 0;
+      sprintf(buf, "%d,%d ", *(data + base), *(data + base + 1));
+      slen = strlen(buf);
+      if (fwrite(buf, slen, 1, savefile) != 1) {
+         perror(path);
+         break;
+      }
+   }
+   fclose(savefile);
+}
+
+static void dumpNode(wznode * node, char * baseDir) {
+   char name[1024];
+   int hasSubNodes = 0;
+   wz_mkdir(baseDir);
+   printf("node: %s\n", baseDir);
+   sprintf(name, "%s/_", baseDir);
+   switch (wz_get_type(node)) {
+      case WZ_IMG: {
+         wz_uint32_t w;
+         wz_uint32_t h;
+         wz_uint16_t depth;
+         wz_uint8_t scale;
+         char buf[4096];
+         unsigned long slen;
+         wz_uint8_t * data = wz_get_img(&w, &h, &depth, &scale, node);
+         saveFile(data, w * h * 4, name);
+         sprintf(name, "%s/_w_h", baseDir);
+         sprintf(buf, "%d,%d", w, h);
+         slen = strlen(buf);
+         saveFile((wz_uint8_t*)buf, slen, name);
+         hasSubNodes = 1;
+      } break;
+      case WZ_AO: {
+         wz_uint32_t size;
+         wz_uint32_t ms;
+         wz_uint16_t format;
+         wz_uint8_t * data = wz_get_ao(&size, &ms, &format, node);
+         saveFile(data, size, name);
+      } break;
+      case WZ_VEX: {
+         wz_uint32_t len;
+         wz_uint32_t i;
+         wz_int32_t * vex;
+         wz_get_vex_len(&len, node);
+         vex = (wz_int32_t*)malloc(sizeof(wz_int32_t) * len * 2);
+         for (i = 0; i < len; i++) {
+            wz_int32_t x, y;
+            unsigned int base = 2 * i;
+            wz_get_vex_at(&x, &y, i, node);
+            *(vex + base) = x;
+            *(vex + base + 1) = y;
+         }
+         saveIntArrayFile(vex, len, name);
+         free(vex);
+      } break;
+      case WZ_VEC: {
+         wz_int32_t * vex = malloc(sizeof(wz_int32_t) * 2);
+         wz_int32_t x, y;
+         wz_get_vec(&x, &y, node);
+         *(vex) = x;
+         *(vex + 1) = y;
+         saveIntArrayFile(vex, 1, name);
+         free(vex);
+      } break;
+      case WZ_STR: {
+         char * data = wz_get_str(node);
+         unsigned long slen = strlen(data);
+         saveFile((wz_uint8_t*)data, slen, name);
+      } break;
+      case WZ_I16:
+      case WZ_I32: {
+         wz_int32_t val;
+         char buf[4096];
+         unsigned long slen;
+         (void) wz_get_int(&val, node);
+         sprintf(buf, "%d", val);
+         slen = strlen(buf);
+         saveFile((wz_uint8_t*)buf, slen, name);
+      } break;
+      case WZ_I64: {
+         wz_int64_t val;
+         char buf[4096];
+         unsigned long slen;
+         (void) wz_get_i64(&val, node);
+         sprintf(buf, "%ld", val);
+         slen = strlen(buf);
+         saveFile((wz_uint8_t*)buf, slen, name);
+      } break;
+      case WZ_F32: {
+         float val;
+         char buf[4096];
+         unsigned long slen;
+         (void) wz_get_f32(&val, node);
+         sprintf(buf, "%f", val);
+         slen = strlen(buf);
+         saveFile((wz_uint8_t*)buf, slen, name);
+      } break;
+      case WZ_F64: {
+         double val;
+         char buf[4096];
+         unsigned long slen;
+         (void) wz_get_f64(&val, node);
+         sprintf(buf, "%lf", val);
+         slen = strlen(buf);
+         saveFile((wz_uint8_t*)buf, slen, name);
+      } break;
+      case WZ_NIL: {
+         saveFile((wz_uint8_t*)"nil", 3, name);
+      } break;
+      case WZ_ARY:
+      default:
+         hasSubNodes = 1;
+   }
+   if (hasSubNodes == 1) {
+      wz_uint32_t len;
+      wz_uint32_t i;
+      wz_get_len(&len, node);
+      for (i = 0; i < len; i++) {
+         wznode * subnode = wz_open_node_at(node, i);
+         const char * subname = wz_get_name(subnode);
+         sprintf(name, "%s/%s", baseDir, subname);
+         dumpNode(subnode, name);
+      }
+   }
+}
+
+static int cmd_dump(int argc, char ** argv) {
+  /* wz ls <file> [<path>] */
+  /* show the contents of given path in the wz file */
+  const char * filename;
+  const char * nodepath;
+  char * savename;
+  wzctx * ctx;
+  wzfile * file;
+  wznode * node_root;
+  wznode * node;
+  if (argc < 3) {
+    fprintf(stderr,
+            "wz: missing file operand.\n"
+            "See 'wz help ls'.\n");
+    return 1;
+  }
+  filename = argv[2];
+  nodepath = argc >= 4 ? argv[3] : "";
+  savename = argc >= 5 ? argv[4] : NULL;
+  if ((ctx = wz_init_ctx()) == NULL)
+    return 1;
+  if ((file = wz_open_file(filename, ctx)) == NULL)
+    goto free_ctx;
+  if ((node_root = wz_open_root(file)) == NULL) {
+    fprintf(stderr, "Error: Unable to open the root node\n");
+    goto close_file;
+  }
+  if ((node = wz_open_node(node_root, nodepath)) == NULL) {
+    fprintf(stderr, "Error: Unable to open the node: %s\n", nodepath);
+    goto close_file;
+  }
+  dumpNode(node, savename);
+close_file:
+  wz_close_file(file);
+free_ctx:
+  wz_free_ctx(ctx);
+  return 0;
 }
 
 int
