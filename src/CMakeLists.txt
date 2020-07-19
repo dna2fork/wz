@@ -28,7 +28,7 @@ set_source_files_properties(
       "${SOURCES_CFLAGS}")
 add_library(
   "lib"
-  SHARED
+  STATIC
     ${CRYPTO_SOURCES}
     ${SOURCES})
 target_include_directories(
